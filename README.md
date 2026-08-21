@@ -17,8 +17,7 @@ Every so often something older wants context diff format instead - the
 I keep running into this with an old patch-review script that only reads
 context diffs, and I got tired of hand-converting, so: this.
 
-Right now it only goes one direction, unified -> context. Given the diff
-above, it produces:
+Given the diff above, it produces:
 
 ```
 *** a/greeting.py
@@ -53,6 +52,12 @@ Write to a file instead of stdout with `-o`:
 python -m diffconv change.patch -o change.ctx.diff
 ```
 
+It goes the other way too, with `--from context --to unified`:
+
+```
+python -m diffconv old.ctx.diff --from context --to unified
+```
+
 If you install the package (`pip install -e .`), the same thing is
 available as the `diffconv` command instead of `python -m diffconv`.
 
@@ -65,9 +70,10 @@ files = parse_unified(open("change.patch").read())
 print(render_context(files))
 ```
 
-`parse_unified` returns a list of `FileDiff` objects (one per file touched
-by the patch, each holding a list of `Hunk` objects), so you can inspect or
-filter the diff before rendering it.
+`parse_unified` and `parse_context` both return a list of `FileDiff`
+objects (one per file touched by the patch, each holding a list of `Hunk`
+objects), so you can inspect or filter the diff before rendering it with
+`render_context` or `render_unified`.
 
 ## Limitations
 

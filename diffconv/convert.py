@@ -1,4 +1,4 @@
-"""Parse unified diffs and render them as POSIX context diffs.
+"""Convert between unified diffs and POSIX context diffs.
 
 Unified diff (what `git diff` and `diff -u` produce) and context diff
 (`diff -c`) describe the same edits, just laid out differently: unified
@@ -154,4 +154,124 @@ def render_context(files):
                 if kind in (" ", "+"):
                     prefix = "  " if tag == " " else ("! " if tag == "!" else "+ ")
                     out.append(prefix + text_)
+    return "\n".join(out) + "\n"
+
+
+def _parse_hunk_range(line, prefix, suffix):
+    body = line[len(prefix):len(line) - len(suffix)]
+    try:
+        if "," in body:
+            start_s, end_s = body.split(",", 1)
+            start, end = int(start_s), int(end_s)
+        else:
+            start = end = int(body)
+    except ValueError:
+        raise ValueError(f"malformed context hunk range: {line!r}") from None
+    # end < start (e.g. "3,2") is how render_context marks a pure insertion
+    # or deletion point - see _format_range - so the count comes out as 0.
+    return start, end - start + 1
+
+
+def _read_marked_lines(lines, i, n, tags):
+    # a context diff line is a one-character tag plus a space, then content;
+    # matching on that fixed prefix is what lets us stop at the first line
+    # that belongs to the next section rather than to this block.
+    prefixes = tuple(tag + " " for tag in tags)
+    result = []
+    while i < n and lines[i].startswith(prefixes):
+        result.append((lines[i][0], lines[i][2:]))
+        i += 1
+    return result, i
+
+
+def _merge_context_lines(before_lines, after_lines):
+    """Interleave a context hunk's before/after blocks into unified order.
+
+    Context diff lists the old file's lines (tagged ' ', '-', '!') and the
+    new file's lines (tagged ' ', '+', '!') as two separate blocks. Unified
+    diff wants them as one stream, so we walk both blocks together: shared
+    context lines advance both pointers in lock step, and each run of
+    changed lines contributes its removals before its additions, mirroring
+    how _tag_changes builds '!' runs from a '-' run followed by a '+' run.
+    """
+    body = []
+    bi, ai = 0, 0
+    bn, an = len(before_lines), len(after_lines)
+    while bi < bn or ai < an:
+        before_tag = before_lines[bi][0] if bi < bn else None
+        after_tag = after_lines[ai][0] if ai < an else None
+        if before_tag == " " or after_tag == " ":
+            if before_tag != " " or after_tag != " " or before_lines[bi][1] != after_lines[ai][1]:
+                raise ValueError("context lines do not align between before and after blocks")
+            body.append((" ", before_lines[bi][1]))
+            bi += 1
+            ai += 1
+            continue
+        advanced = False
+        while bi < bn and before_lines[bi][0] in ("-", "!"):
+            body.append(("-", before_lines[bi][1]))
+            bi += 1
+            advanced = True
+        while ai < an and after_lines[ai][0] in ("+", "!"):
+            body.append(("+", after_lines[ai][1]))
+            ai += 1
+            advanced = True
+        if not advanced:
+            raise ValueError("malformed context diff hunk: could not align before/after blocks")
+    return body
+
+
+def parse_context(text):
+    """Parse context diff text into a list of FileDiff objects."""
+    lines = text.splitlines()
+    n = len(lines)
+    files = []
+    i = 0
+    while i < n:
+        line = lines[i]
+        if line.startswith("*** ") and i + 1 < n and lines[i + 1].startswith("--- "):
+            old_path, old_label = _split_header(line[4:])
+            new_path, new_label = _split_header(lines[i + 1][4:])
+            i += 2
+            hunks = []
+            while i < n and lines[i].startswith("***************"):
+                i += 1
+                if i >= n or not (lines[i].startswith("*** ") and lines[i].endswith(" ****")):
+                    raise ValueError(f"expected old-range header, got: {lines[i] if i < n else ''!r}")
+                old_start, old_count = _parse_hunk_range(lines[i], "*** ", " ****")
+                i += 1
+                before_lines, i = _read_marked_lines(lines, i, n, (" ", "-", "!"))
+
+                if i >= n or not (lines[i].startswith("--- ") and lines[i].endswith(" ----")):
+                    raise ValueError(f"expected new-range header, got: {lines[i] if i < n else ''!r}")
+                new_start, new_count = _parse_hunk_range(lines[i], "--- ", " ----")
+                i += 1
+                after_lines, i = _read_marked_lines(lines, i, n, (" ", "+", "!"))
+
+                body = _merge_context_lines(before_lines, after_lines)
+                hunks.append(Hunk(old_start, old_count, new_start, new_count, body))
+            files.append(FileDiff(old_path, old_label, new_path, new_label, hunks))
+        else:
+            i += 1
+    return files
+
+
+def _format_unified_range(start, count):
+    if count == 1:
+        return str(start)
+    return f"{start},{count}"
+
+
+def render_unified(files):
+    """Render FileDiff objects as unified diff text."""
+    out = []
+    for file_diff in files:
+        out.append(f"--- {file_diff.old_path}{file_diff.old_label}")
+        out.append(f"+++ {file_diff.new_path}{file_diff.new_label}")
+        for hunk in file_diff.hunks:
+            old_range = _format_unified_range(hunk.old_start, hunk.old_count)
+            new_range = _format_unified_range(hunk.new_start, hunk.new_count)
+            out.append(f"@@ -{old_range} +{new_range} @@")
+            for kind, text_ in hunk.lines:
+                out.append(kind + text_)
     return "\n".join(out) + "\n"
