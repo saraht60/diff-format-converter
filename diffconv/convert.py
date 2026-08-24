@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import re
 
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+NO_NEWLINE_MARKER = "\\ No newline at end of file"
 
 
 @dataclass
@@ -19,8 +20,10 @@ class Hunk:
     old_count: int
     new_start: int
     new_count: int
-    # each entry is (kind, text) where kind is ' ' (context), '-' (removed)
-    # or '+' (added), in the order they appear in the unified hunk body.
+    # each entry is (kind, text, has_newline) where kind is ' ' (context),
+    # '-' (removed) or '+' (added), in the order they appear in the unified
+    # hunk body. has_newline is False for a line immediately followed by
+    # "\ No newline at end of file" in the source diff.
     lines: list = field(default_factory=list)
 
 
@@ -75,7 +78,11 @@ def parse_unified(text):
                         raise ValueError("unified diff hunk ended before its line counts were satisfied")
                     raw = lines[i]
                     if raw.startswith("\\"):
-                        # "\ No newline at end of file" - not a content line
+                        # "\ No newline at end of file" applies to the line
+                        # that was just appended, not a content line itself.
+                        if body and raw == NO_NEWLINE_MARKER:
+                            kind, text_, _ = body[-1]
+                            body[-1] = (kind, text_, False)
                         i += 1
                         continue
                     kind = raw[0] if raw else " "
@@ -89,7 +96,7 @@ def parse_unified(text):
                         remaining_new -= 1
                     else:
                         raise ValueError(f"unexpected line in hunk body: {raw!r}")
-                    body.append((kind, text_))
+                    body.append((kind, text_, True))
                     i += 1
 
                 hunks.append(Hunk(old_start, old_count, new_start, new_count, body))
@@ -105,7 +112,7 @@ def _tag_changes(lines):
     Context diff shows a block of lines that were swapped for other lines
     with '!' on both sides, rather than as an unpaired delete plus insert.
     """
-    tags = [kind if kind in ("-", "+") else " " for kind, _ in lines]
+    tags = [kind if kind in ("-", "+") else " " for kind, _, _ in lines]
     i, n = 0, len(lines)
     while i < n:
         if lines[i][0] == "-":
@@ -144,16 +151,20 @@ def render_context(files):
             tags = _tag_changes(hunk.lines)
 
             out.append(f"*** {_format_range(hunk.old_start, hunk.old_count)} ****")
-            for (kind, text_), tag in zip(hunk.lines, tags):
+            for (kind, text_, newline), tag in zip(hunk.lines, tags):
                 if kind in (" ", "-"):
                     prefix = "  " if tag == " " else ("! " if tag == "!" else "- ")
                     out.append(prefix + text_)
+                    if not newline:
+                        out.append(NO_NEWLINE_MARKER)
 
             out.append(f"--- {_format_range(hunk.new_start, hunk.new_count)} ----")
-            for (kind, text_), tag in zip(hunk.lines, tags):
+            for (kind, text_, newline), tag in zip(hunk.lines, tags):
                 if kind in (" ", "+"):
                     prefix = "  " if tag == " " else ("! " if tag == "!" else "+ ")
                     out.append(prefix + text_)
+                    if not newline:
+                        out.append(NO_NEWLINE_MARKER)
     return "\n".join(out) + "\n"
 
 
@@ -179,9 +190,12 @@ def _read_marked_lines(lines, i, n, tags):
     prefixes = tuple(tag + " " for tag in tags)
     result = []
     while i < n and lines[i].startswith(prefixes):
-        result.append((lines[i][0], lines[i][2:]))
+        result.append([lines[i][0], lines[i][2:], True])
         i += 1
-    return result, i
+        if i < n and lines[i] == NO_NEWLINE_MARKER:
+            result[-1][2] = False
+            i += 1
+    return [tuple(entry) for entry in result], i
 
 
 def _merge_context_lines(before_lines, after_lines):
@@ -203,17 +217,17 @@ def _merge_context_lines(before_lines, after_lines):
         if before_tag == " " or after_tag == " ":
             if before_tag != " " or after_tag != " " or before_lines[bi][1] != after_lines[ai][1]:
                 raise ValueError("context lines do not align between before and after blocks")
-            body.append((" ", before_lines[bi][1]))
+            body.append((" ", before_lines[bi][1], before_lines[bi][2]))
             bi += 1
             ai += 1
             continue
         advanced = False
         while bi < bn and before_lines[bi][0] in ("-", "!"):
-            body.append(("-", before_lines[bi][1]))
+            body.append(("-", before_lines[bi][1], before_lines[bi][2]))
             bi += 1
             advanced = True
         while ai < an and after_lines[ai][0] in ("+", "!"):
-            body.append(("+", after_lines[ai][1]))
+            body.append(("+", after_lines[ai][1], after_lines[ai][2]))
             ai += 1
             advanced = True
         if not advanced:
@@ -272,6 +286,8 @@ def render_unified(files):
             old_range = _format_unified_range(hunk.old_start, hunk.old_count)
             new_range = _format_unified_range(hunk.new_start, hunk.new_count)
             out.append(f"@@ -{old_range} +{new_range} @@")
-            for kind, text_ in hunk.lines:
+            for kind, text_, newline in hunk.lines:
                 out.append(kind + text_)
+                if not newline:
+                    out.append(NO_NEWLINE_MARKER)
     return "\n".join(out) + "\n"

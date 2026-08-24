@@ -78,5 +78,7 @@ objects), so you can inspect or filter the diff before rendering it with
 ## Limitations
 
 This is a first pass. It handles the common case - plain unified diffs with
-standard `@@ -l,s +l,s @@` headers - but not everything a real diff can
-contain yet. See the roadmap for what's missing.
+standard `@@ -l,s +l,s @@` headers, including files with no trailing newline
+- but not everything a real diff can contain yet. It doesn't understand git's
+extended headers (renames, mode changes, binary file notices), and it
+assumes the input format rather than detecting it.
