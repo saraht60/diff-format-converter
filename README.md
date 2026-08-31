@@ -79,6 +79,16 @@ objects), so you can inspect or filter the diff before rendering it with
 
 This is a first pass. It handles the common case - plain unified diffs with
 standard `@@ -l,s +l,s @@` headers, including files with no trailing newline
-- but not everything a real diff can contain yet. It doesn't understand git's
-extended headers (renames, mode changes, binary file notices), and it
-assumes the input format rather than detecting it.
+- but not everything a real diff can contain yet.
+
+It understands git's `diff --git` extended headers well enough to carry them
+through unchanged: renames, mode changes, and binary file notices all
+round-trip, even the ones with no `---`/`+++` section of their own (a pure
+rename or mode change has nothing else to show). It doesn't try to interpret
+those headers, though - a rename shows up as the same opaque `rename
+from`/`rename to` lines on both sides rather than as a change to `old_path`
+or `new_path` you could inspect programmatically, and quoted paths (a
+filename containing a space or a non-ASCII character) aren't unescaped.
+
+It also assumes the input format rather than detecting it - you have to pass
+`--from context` yourself if you're not starting from unified diff.

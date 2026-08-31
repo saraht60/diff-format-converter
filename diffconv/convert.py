@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import re
 
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+DIFF_GIT_RE = re.compile(r"^diff --git a/(.*) b/(.*)$")
 NO_NEWLINE_MARKER = "\\ No newline at end of file"
 
 
@@ -34,6 +35,14 @@ class FileDiff:
     new_path: str
     new_label: str
     hunks: list = field(default_factory=list)
+    # raw lines from a git "diff --git" extended header block (renames,
+    # mode changes, index lines, binary file notices) that preceded the
+    # file's "---"/"+++" or "***"/"---" header in the source diff.
+    extended: list = field(default_factory=list)
+    # False for a git extended-header entry with no "---"/"+++" section at
+    # all - a pure rename, mode change, or binary file notice. render_unified
+    # uses this to skip re-adding a header git never wrote in the first place.
+    has_content: bool = True
 
 
 def _split_header(rest):
@@ -45,6 +54,54 @@ def _split_header(rest):
     return rest, ""
 
 
+def _parse_unified_hunks(lines, i, n):
+    """Parse consecutive "@@ ... @@" hunks starting at lines[i]."""
+    hunks = []
+    while i < n and lines[i].startswith("@@ "):
+        match = HUNK_RE.match(lines[i])
+        if not match:
+            raise ValueError(f"malformed hunk header: {lines[i]!r}")
+        old_start = int(match.group(1))
+        old_count = int(match.group(2)) if match.group(2) is not None else 1
+        new_start = int(match.group(3))
+        new_count = int(match.group(4)) if match.group(4) is not None else 1
+        i += 1
+
+        body = []
+        remaining_old, remaining_new = old_count, new_count
+        # read by counting consumed old/new lines rather than by
+        # sniffing prefixes, since a removed line can itself start
+        # with "--- " and would otherwise look like a file header.
+        while remaining_old > 0 or remaining_new > 0:
+            if i >= n:
+                raise ValueError("unified diff hunk ended before its line counts were satisfied")
+            raw = lines[i]
+            if raw.startswith("\\"):
+                # "\ No newline at end of file" applies to the line
+                # that was just appended, not a content line itself.
+                if body and raw == NO_NEWLINE_MARKER:
+                    kind, text_, _ = body[-1]
+                    body[-1] = (kind, text_, False)
+                i += 1
+                continue
+            kind = raw[0] if raw else " "
+            text_ = raw[1:] if raw else ""
+            if kind == " ":
+                remaining_old -= 1
+                remaining_new -= 1
+            elif kind == "-":
+                remaining_old -= 1
+            elif kind == "+":
+                remaining_new -= 1
+            else:
+                raise ValueError(f"unexpected line in hunk body: {raw!r}")
+            body.append((kind, text_, True))
+            i += 1
+
+        hunks.append(Hunk(old_start, old_count, new_start, new_count, body))
+    return hunks, i
+
+
 def parse_unified(text):
     """Parse unified diff text into a list of FileDiff objects."""
     lines = text.splitlines()
@@ -53,53 +110,29 @@ def parse_unified(text):
     i = 0
     while i < n:
         line = lines[i]
-        if line.startswith("--- ") and i + 1 < n and lines[i + 1].startswith("+++ "):
+        git_match = DIFF_GIT_RE.match(line)
+        if git_match:
+            extended = [line]
+            i += 1
+            while i < n and not lines[i].startswith("--- ") and not DIFF_GIT_RE.match(lines[i]):
+                extended.append(lines[i])
+                i += 1
+            if i < n and lines[i].startswith("--- ") and i + 1 < n and lines[i + 1].startswith("+++ "):
+                old_path, old_label = _split_header(lines[i][4:])
+                new_path, new_label = _split_header(lines[i + 1][4:])
+                i += 2
+                hunks, i = _parse_unified_hunks(lines, i, n)
+                files.append(FileDiff(old_path, old_label, new_path, new_label, hunks, extended, True))
+            else:
+                # extended-header-only entry: a rename, mode change, or
+                # binary file notice with no "---"/"+++" section at all.
+                old_git, new_git = git_match.group(1), git_match.group(2)
+                files.append(FileDiff(f"a/{old_git}", "", f"b/{new_git}", "", [], extended, False))
+        elif line.startswith("--- ") and i + 1 < n and lines[i + 1].startswith("+++ "):
             old_path, old_label = _split_header(line[4:])
             new_path, new_label = _split_header(lines[i + 1][4:])
             i += 2
-            hunks = []
-            while i < n and lines[i].startswith("@@ "):
-                match = HUNK_RE.match(lines[i])
-                if not match:
-                    raise ValueError(f"malformed hunk header: {lines[i]!r}")
-                old_start = int(match.group(1))
-                old_count = int(match.group(2)) if match.group(2) is not None else 1
-                new_start = int(match.group(3))
-                new_count = int(match.group(4)) if match.group(4) is not None else 1
-                i += 1
-
-                body = []
-                remaining_old, remaining_new = old_count, new_count
-                # read by counting consumed old/new lines rather than by
-                # sniffing prefixes, since a removed line can itself start
-                # with "--- " and would otherwise look like a file header.
-                while remaining_old > 0 or remaining_new > 0:
-                    if i >= n:
-                        raise ValueError("unified diff hunk ended before its line counts were satisfied")
-                    raw = lines[i]
-                    if raw.startswith("\\"):
-                        # "\ No newline at end of file" applies to the line
-                        # that was just appended, not a content line itself.
-                        if body and raw == NO_NEWLINE_MARKER:
-                            kind, text_, _ = body[-1]
-                            body[-1] = (kind, text_, False)
-                        i += 1
-                        continue
-                    kind = raw[0] if raw else " "
-                    text_ = raw[1:] if raw else ""
-                    if kind == " ":
-                        remaining_old -= 1
-                        remaining_new -= 1
-                    elif kind == "-":
-                        remaining_old -= 1
-                    elif kind == "+":
-                        remaining_new -= 1
-                    else:
-                        raise ValueError(f"unexpected line in hunk body: {raw!r}")
-                    body.append((kind, text_, True))
-                    i += 1
-
-                hunks.append(Hunk(old_start, old_count, new_start, new_count, body))
+            hunks, i = _parse_unified_hunks(lines, i, n)
             files.append(FileDiff(old_path, old_label, new_path, new_label, hunks))
         else:
             i += 1
@@ -144,6 +177,7 @@ def render_context(files):
     """Render FileDiff objects as context diff text."""
     out = []
     for file_diff in files:
+        out.extend(file_diff.extended)
         out.append(f"*** {file_diff.old_path}{file_diff.old_label}")
         out.append(f"--- {file_diff.new_path}{file_diff.new_label}")
         for hunk in file_diff.hunks:
@@ -242,9 +276,18 @@ def parse_context(text):
     files = []
     i = 0
     while i < n:
-        line = lines[i]
-        if line.startswith("*** ") and i + 1 < n and lines[i + 1].startswith("--- "):
-            old_path, old_label = _split_header(line[4:])
+        git_match = DIFF_GIT_RE.match(lines[i])
+        if git_match:
+            extended = [lines[i]]
+            i += 1
+            while i < n and not lines[i].startswith("*** "):
+                extended.append(lines[i])
+                i += 1
+        else:
+            extended = []
+
+        if i < n and lines[i].startswith("*** ") and i + 1 < n and lines[i + 1].startswith("--- "):
+            old_path, old_label = _split_header(lines[i][4:])
             new_path, new_label = _split_header(lines[i + 1][4:])
             i += 2
             hunks = []
@@ -264,7 +307,11 @@ def parse_context(text):
 
                 body = _merge_context_lines(before_lines, after_lines)
                 hunks.append(Hunk(old_start, old_count, new_start, new_count, body))
-            files.append(FileDiff(old_path, old_label, new_path, new_label, hunks))
+            # an extended header with no hunks means the source unified diff
+            # had no "---"/"+++" section either (a pure rename, mode change,
+            # or binary file notice) - see parse_unified.
+            has_content = bool(hunks) or not extended
+            files.append(FileDiff(old_path, old_label, new_path, new_label, hunks, extended, has_content))
         else:
             i += 1
     return files
@@ -280,14 +327,16 @@ def render_unified(files):
     """Render FileDiff objects as unified diff text."""
     out = []
     for file_diff in files:
-        out.append(f"--- {file_diff.old_path}{file_diff.old_label}")
-        out.append(f"+++ {file_diff.new_path}{file_diff.new_label}")
-        for hunk in file_diff.hunks:
-            old_range = _format_unified_range(hunk.old_start, hunk.old_count)
-            new_range = _format_unified_range(hunk.new_start, hunk.new_count)
-            out.append(f"@@ -{old_range} +{new_range} @@")
-            for kind, text_, newline in hunk.lines:
-                out.append(kind + text_)
-                if not newline:
-                    out.append(NO_NEWLINE_MARKER)
+        out.extend(file_diff.extended)
+        if file_diff.has_content:
+            out.append(f"--- {file_diff.old_path}{file_diff.old_label}")
+            out.append(f"+++ {file_diff.new_path}{file_diff.new_label}")
+            for hunk in file_diff.hunks:
+                old_range = _format_unified_range(hunk.old_start, hunk.old_count)
+                new_range = _format_unified_range(hunk.new_start, hunk.new_count)
+                out.append(f"@@ -{old_range} +{new_range} @@")
+                for kind, text_, newline in hunk.lines:
+                    out.append(kind + text_)
+                    if not newline:
+                        out.append(NO_NEWLINE_MARKER)
     return "\n".join(out) + "\n"
