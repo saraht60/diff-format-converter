@@ -92,3 +92,13 @@ filename containing a space or a non-ASCII character) aren't unescaped.
 
 It also assumes the input format rather than detecting it - you have to pass
 `--from context` yourself if you're not starting from unified diff.
+
+## Tests
+
+```
+python -m unittest discover
+```
+
+`tests/fixtures/` holds paired `.diff`/`.ctx.diff` files used for exact
+output checks and round-trip checks (unified -> context -> unified should
+reproduce the original).

@@ -1,0 +1,8 @@
+--- a/note.txt
++++ b/note.txt
+@@ -1,2 +1,2 @@
+ first line
+-old last line
+\ No newline at end of file
++new last line
+\ No newline at end of file

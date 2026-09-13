@@ -1,0 +1,9 @@
+*** a/greeting.py
+--- b/greeting.py
+***************
+*** 1,2 ****
+  def greet(name):
+!     print("Hello " + name)
+--- 1,2 ----
+  def greet(name):
+!     print(f"Hello, {name}!")

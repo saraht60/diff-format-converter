@@ -1,0 +1,11 @@
+*** a/note.txt
+--- b/note.txt
+***************
+*** 1,2 ****
+  first line
+! old last line
+\ No newline at end of file
+--- 1,2 ----
+  first line
+! new last line
+\ No newline at end of file

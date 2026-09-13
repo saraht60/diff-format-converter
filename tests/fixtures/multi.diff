@@ -1,0 +1,17 @@
+--- a/module.py
++++ b/module.py
+@@ -1,3 +1,3 @@
+ import os
+-def old():
++def new():
+     pass
+@@ -10,2 +10,3 @@
+ def helper():
+     return 1
++    # extra
+--- a/other.py
++++ b/other.py
+@@ -2,3 +2,2 @@
+ alpha
+-beta
+ gamma

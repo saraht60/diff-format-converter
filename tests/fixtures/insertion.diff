@@ -1,0 +1,4 @@
+--- a/file.txt
++++ b/file.txt
+@@ -5,0 +6 @@
++inserted line
